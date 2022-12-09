@@ -13,47 +13,34 @@ import (
 	"time"
 )
 
-func parsePayloadBin(filename string) string {
-
-	// Open a zip archive for reading.
-	r, err := zip.OpenReader(filename)
+func extractPayloadBin(filename string) string {
+	zipReader, err := zip.OpenReader(filename)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Not a valid zip archive: %s\n", filename)
 	}
-	defer r.Close()
+	defer zipReader.Close()
 
-	// Iterate through the files in the archive,
-	// printing some of their contents.
-	for _, f := range r.File {
-		fmt.Printf("Contents of %s:\n", f.Name)
-		rc, err := f.Open()
-		if err != nil {
-			log.Fatal(err)
+	for _, file := range zipReader.Reader.File {
+		if file.Name == "payload.bin" && file.UncompressedSize64 > 0 {
+			zippedFile, err := file.Open()
+			if err != nil {
+				log.Fatalf("Failed to read zipped file: %s\n", file.Name)
+			}
+
+			tempfile, err := ioutil.TempFile(os.TempDir(), "payload_*.bin")
+			if err != nil {
+				log.Fatalf("Failed to create a temp file located at %s\n", tempfile.Name())
+			}
+			defer tempfile.Close()
+
+			_, err = io.Copy(tempfile, zippedFile)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			return tempfile.Name()
 		}
-		_, err = io.CopyN(ioutil.Discard, rc, 68)
-		if err != nil {
-			log.Fatal(err)
-		}
-		buf := make([]byte, 8)
-		_, err = rc.Read(buf)
-		if err != nil {
-			log.Fatal(err)
-		}
-		fmt.Printf("Payload Version: %d\n", binary.BigEndian.Uint64(buf))
-		_, err = io.CopyN(ioutil.Discard, rc, 8)
-		if err != nil {
-			log.Fatal(err)
-		}
-		buf = make([]byte, 4)
-		_, err = rc.Read(buf)
-		if err != nil {
-			log.Fatal(err)
-		}
-		fmt.Printf("Payload Manifest Signature Length: %d\n", binary.BigEndian.Uint32(buf))
-		rc.Close()
 	}
-	return ""
-}
 
 	return ""
 }
@@ -68,41 +55,49 @@ func main() {
 		concurrency     int
 	)
 
-    
-	flag.BoolVar(&list, "l", false, "List partitions")
-	flag.StringVar(&partitions, "p", "", "Partitions to replace")
-	flag.StringVar(&outputDirectory, "o", "", "Output directory")
-	flag.IntVar(&concurrency, "c", 4, "Number of workers")
+	flag.IntVar(&concurrency, "c", 4, "Number of multiple workers to extract (shorthand)")
+	flag.IntVar(&concurrency, "concurrency", 4, "Number of multiple workers to extract")
+	flag.BoolVar(&list, "l", false, "Show list of partitions in payload.bin (shorthand)")
+	flag.BoolVar(&list, "list", false, "Show list of partitions in payload.bin")
+	flag.StringVar(&outputDirectory, "o", "", "Set output directory (shorthand)")
+	flag.StringVar(&outputDirectory, "output", "", "Set output directory")
+	flag.StringVar(&partitions, "r", "", "repack payload bin (comma-separated) (shorthand)")
+	flag.StringVar(&partitions, "partitions", "", "Dump only selected partitions (comma-separated)")
 	flag.Parse()
 
 	if flag.NArg() == 0 {
 		usage()
 	}
-	filename := flag.Arg(0)
+	
+	file := flag.Arg(0)
+	if _, err := os.Stat(file); os.IsNotExist(err) {
+		log.Fatalf("File not found: %s\n", file)
+	}
 
-	if _, err := os.Stat(filename); os.IsNotExist(err) {
-		log.Fatalf("File does not exist: %s\n", filename)
+	payloadBin := extractPayloadBin(file)
+	if payloadBin == "" {
+		log.Fatalf("Failed to extract payload.bin from %s\n", file)
+	}
+	defer os.Remove(payloadBin)
+
+	payload, err := NewPayload(payloadBin)
+	if err != nil {
+		log.Fatalf("Failed to read payload.bin: %s\n", payloadBin)
 	}
 
 	if list {
-		listPartitions(filename)
-		os.Exit(0)
-	}
+		partitions := payload.GetPartitions()
+		for _, partition := range partitions {
+			fmt.Printf("%s (%d bytes)
 
-	if partitions != "" {
-		if _, err := os.Stat(outputDirectory); os.IsNotExist(err) {
-			log.Fatalf("Output directory does not exist: %s\n", outputDirectory)
+", partition.Name, partition.Size)
 		}
+	now := time.Now()
+
+	var targetDirectory = outputDirectory
+	if targetDirectory == "" {
+		targetDirectory = fmt.Sprintf("%s_%d", file, now.Unix())
 	}
-
-	start := time.Now()
-
-	if err := extract(filename, partitions, outputDirectory, concurrency); err != nil {
-		log.Fatal(err)
-	}
-
-	log.Printf("Extracted in %s\n", time.Since(start))
-}
 
 	payload.SetConcurrency(concurrency)
 	fmt.Printf("Number of workers: %d\n", payload.GetConcurrency())
@@ -118,13 +113,23 @@ func main() {
 	}
 }
 
-
-
-//add payload parse function to replace system image in payload file
-func (p *Payload) AddPayloadParse() error {
-	//add payload parse function to replace system image in payload file
-	if err := p.parsePayload(); err != nil {
-		return err
+	#lets repack the payload.bin
+	if partitions != "" {
+		if err := payload.RepackSelected(targetDirectory, strings.Split(partitions, ",")); err != nil {
+			log.Fatal(err)
+		}
+	} else {
+		if err := payload.RepackAll(targetDirectory); err != nil {
+			log.Fatal(err)
+		}
 	}
-	return nil
+
+}
+
+
+
+func usage() {
+	fmt.Fprintf(os.Stderr, "Usage: %s [options] [inputfile]\n", os.Args[0])
+	flag.PrintDefaults()
+	os.Exit(2)
 }
