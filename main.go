@@ -1,5 +1,4 @@
 package main
-#payload bin parser to replace the system img file in the payload bin
 
 import (
 	"archive/zip"
