@@ -102,10 +102,10 @@ func (ph *payloadHeader) ReadFromPayload() error {
 }
 
 // NewPayload creates a new Payload struct
-func NewPayload(filename string) *Payload {
-	payload := &Payload{
-		Filename:   filename,
-		concurrency: runtime.NumCPU(),
+func NewPayload(filename string) Payload {
+	payload := Payload{
+		Filename:    filename,
+		concurrency: 4,
 	}
 
 	return payload
@@ -204,14 +204,14 @@ func (p *Payload) Init() error {
 	return nil
 }
 
-func (p *Payload) writeDataBlob(offset int64, length int64) ([]byte, error) {
-	if _, err := p.file.Seek(offset, 0); err != nil {
+func (p *Payload) readDataBlob(offset int64, length int64) ([]byte, error) {
+	buf := make([]byte, length)
+	n, err := p.file.ReadAt(buf, p.dataOffset+offset)
+	if err != nil {
 		return nil, err
 	}
-
-	buf := make([]byte, length)
-	if _, err := p.file.Read(buf); err != nil {
-		return nil, err
+	if int64(n) != length {
+		return nil, fmt.Errorf("Read length mismatch: %d != %d", n, length)
 	}
 
 	return buf, nil
@@ -303,6 +303,13 @@ func (p *Payload) Extract(partition *chromeos_update_engine.PartitionUpdate, out
 			return fmt.Errorf("Unhandled operation type: %s", operation.GetType().String())
 		}
 
+		// verify hash
+		hash := hex.EncodeToString(bufSha.Sum(nil))
+		expectedHash := hex.EncodeToString(operation.GetDataSha256Hash())
+		if expectedHash != "" && hash != expectedHash {
+			return fmt.Errorf("Verify failed (Checksum mismatch): %s (%s != %s)", name, hash, expectedHash)
+		}
+	}
 
 	return nil
 }
