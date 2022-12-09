@@ -61,42 +61,51 @@ func main() {
 	flag.BoolVar(&list, "list", false, "Show list of partitions in payload.bin")
 	flag.StringVar(&outputDirectory, "o", "", "Set output directory (shorthand)")
 	flag.StringVar(&outputDirectory, "output", "", "Set output directory")
-	flag.StringVar(&partitions, "r", "", "repack payload bin (comma-separated) (shorthand)")
+	flag.StringVar(&partitions, "p", "", "Dump only selected partitions (comma-separated) (shorthand)")
 	flag.StringVar(&partitions, "partitions", "", "Dump only selected partitions (comma-separated)")
 	flag.Parse()
 
 	if flag.NArg() == 0 {
 		usage()
 	}
-	
-	file := flag.Arg(0)
-	if _, err := os.Stat(file); os.IsNotExist(err) {
-		log.Fatalf("File not found: %s\n", file)
+	filename := flag.Arg(0)
+
+	if _, err := os.Stat(filename); os.IsNotExist(err) {
+		log.Fatalf("File does not exist: %s\n", filename)
 	}
 
-	payloadBin := extractPayloadBin(file)
-	if payloadBin == "" {
-		log.Fatalf("Failed to extract payload.bin from %s\n", file)
+	payloadBin := filename
+	if strings.HasSuffix(filename, ".zip") {
+		fmt.Println("Please wait while extracting payload.bin from the archive.")
+		payloadBin = extractPayloadBin(filename)
+		if payloadBin == "" {
+			log.Fatal("Failed to extract payload.bin from the archive.")
+		} else {
+			defer os.Remove(payloadBin)
+		}
 	}
-	defer os.Remove(payloadBin)
+	fmt.Printf("payload.bin: %s\n", payloadBin)
 
-	payload, err := NewPayload(payloadBin)
-	if err != nil {
-		log.Fatalf("Failed to read payload.bin: %s\n", payloadBin)
+	payload := NewPayload(payloadBin)
+	if err := payload.Open(); err != nil {
+		log.Fatal(err)
 	}
+	payload.Init()
 
 	if list {
-		partitions := payload.GetPartitions()
-		for _, partition := range partitions {
-			fmt.Printf("%s (%d bytes)
+		return
+	}
 
-", partition.Name, partition.Size)
-		}
 	now := time.Now()
 
 	var targetDirectory = outputDirectory
 	if targetDirectory == "" {
-		targetDirectory = fmt.Sprintf("%s_%d", file, now.Unix())
+		targetDirectory = fmt.Sprintf("extracted_%d%02d%02d_%02d%02d%02d", now.Year(), now.Month(), now.Day(), now.Hour(), now.Minute(), now.Second())
+	}
+	if _, err := os.Stat(targetDirectory); os.IsNotExist(err) {
+		if err := os.Mkdir(targetDirectory, 0755); err != nil {
+			log.Fatal("Failed to create target directory")
+		}
 	}
 
 	payload.SetConcurrency(concurrency)
@@ -112,21 +121,6 @@ func main() {
 		}
 	}
 }
-
-	#lets repack the payload.bin
-	if partitions != "" {
-		if err := payload.RepackSelected(targetDirectory, strings.Split(partitions, ",")); err != nil {
-			log.Fatal(err)
-		}
-	} else {
-		if err := payload.RepackAll(targetDirectory); err != nil {
-			log.Fatal(err)
-		}
-	}
-
-}
-
-
 
 func usage() {
 	fmt.Fprintf(os.Stderr, "Usage: %s [options] [inputfile]\n", os.Args[0])
