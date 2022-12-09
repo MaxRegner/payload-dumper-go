@@ -1,16 +1,17 @@
 package main
 
 import (
-	"archive/zip"
-	"compress/gzip"
+	"bytes"
+	"compress/bzip2"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"log"
 	"os"
-	"runtime"
-	"strings"
-	"time"
+	"sort"
+	"sync"
 
 	humanize "github.com/dustin/go-humanize"
 	"github.com/golang/protobuf/proto"
