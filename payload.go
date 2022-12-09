@@ -1,5 +1,4 @@
 package main
-
 import (
 	"bytes"
 	"compress/bzip2"
@@ -12,6 +11,8 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"time"
+
 
 	humanize "github.com/dustin/go-humanize"
 	"github.com/golang/protobuf/proto"
@@ -121,30 +122,37 @@ func (p *Payload) GetConcurrency() int {
 	return p.concurrency
 }
 
-// Open tries to open payload.bin file defined by Filename
+//Repack repacks payload.bin
+func (p *Payload) Repack(targetDirectory string) error {
+	if err := p.Open(); err != nil {
+		return err
+	}
+	defer p.file.Close()
+
+	if err := p.readHeader(); err != nil {
+		return err
+//creates tries to open payload.bin file defined by Filename
 func (p *Payload) Open() error {
+	if p.file != nil {
+		return nil
+	}
+
 	file, err := os.Open(p.Filename)
 	if err != nil {
 		return err
 	}
-
 	p.file = file
+
 	return nil
 }
 
-func (p *Payload) readManifest() (*chromeos_update_engine.DeltaArchiveManifest, error) {
-	buf := make([]byte, p.header.ManifestLen)
-	if _, err := p.file.Read(buf); err != nil {
-		return nil, err
-	}
-	deltaArchiveManifest := &chromeos_update_engine.DeltaArchiveManifest{}
-	if err := proto.Unmarshal(buf, deltaArchiveManifest); err != nil {
-		return nil, err
+func (p *Payload) readHeader() error {
+	if err := p.header.ReadFromPayload(); err != nil {
+		return err
 	}
 
-	return deltaArchiveManifest, nil
+	return nil
 }
-
 func (p *Payload) readMetadataSignature() (*chromeos_update_engine.Signatures, error) {
 	if _, err := p.file.Seek(int64(p.header.Size+p.header.ManifestLen), 0); err != nil {
 		return nil, err
@@ -217,119 +225,17 @@ func (p *Payload) readDataBlob(offset int64, length int64) ([]byte, error) {
 	return buf, nil
 }
 
-func (p *Payload) Extract(partition *chromeos_update_engine.PartitionUpdate, out *os.File) error {
-	name := partition.GetPartitionName()
-	info := partition.GetNewPartitionInfo()
-	totalOperations := len(partition.Operations)
-	barName := fmt.Sprintf("%s (%s)", name, humanize.Bytes(info.GetSize()))
-	bar := p.progress.AddBar(
-		int64(totalOperations),
-		mpb.PrependDecorators(
-			decor.Name(barName, decor.WCSyncSpaceR),
-		),
-		mpb.AppendDecorators(
-			decor.Percentage(),
-		),
-	)
-	defer bar.SetTotal(0, true)
-
-	for _, operation := range partition.Operations {
-		if len(operation.DstExtents) == 0 {
-			return fmt.Errorf("Invalid operation.DstExtents for the partition %s", name)
-		}
-		bar.Increment()
-
-		e := operation.DstExtents[0]
-		dataOffset := p.dataOffset + int64(operation.GetDataOffset())
-		dataLength := int64(operation.GetDataLength())
-		_, err := out.Seek(int64(e.GetStartBlock())*blockSize, 0)
-		if err != nil {
-			return err
-		}
-		expectedUncompressedBlockSize := int64(e.GetNumBlocks() * blockSize)
-
-		bufSha := sha256.New()
-		teeReader := io.TeeReader(io.NewSectionReader(p.file, dataOffset, dataLength), bufSha)
-
-		switch operation.GetType() {
-		case chromeos_update_engine.InstallOperation_REPLACE:
-			n, err := io.Copy(out, teeReader)
-			if err != nil {
-				return err
-			}
-
-			if int64(n) != expectedUncompressedBlockSize {
-				return fmt.Errorf("Verify failed (Unexpected bytes written): %s (%d != %d)", name, n, expectedUncompressedBlockSize)
-			}
-			break
-
-		case chromeos_update_engine.InstallOperation_REPLACE_XZ:
-			reader := xz.NewDecompressionReader(teeReader)
-			n, err := io.Copy(out, &reader)
-			if err != nil {
-				return err
-			}
-			reader.Close()
-			if n != expectedUncompressedBlockSize {
-				return fmt.Errorf("Verify failed (Unexpected bytes written): %s (%d != %d)", name, n, expectedUncompressedBlockSize)
-			}
-
-			break
-
-		case chromeos_update_engine.InstallOperation_REPLACE_BZ:
-			reader := bzip2.NewReader(teeReader)
-			n, err := io.Copy(out, reader)
-			if err != nil {
-				return err
-			}
-			if n != expectedUncompressedBlockSize {
-				return fmt.Errorf("Verify failed (Unexpected bytes written): %s (%d != %d)", name, n, expectedUncompressedBlockSize)
-			}
-			break
-
-		case chromeos_update_engine.InstallOperation_ZERO:
-			reader := bytes.NewReader(make([]byte, expectedUncompressedBlockSize))
-			n, err := io.Copy(out, reader)
-			if err != nil {
-				return err
-			}
-
-			if n != expectedUncompressedBlockSize {
-				return fmt.Errorf("Verify failed (Unexpected bytes written): %s (%d != %d)", name, n, expectedUncompressedBlockSize)
-			}
-			break
-
-		default:
-			return fmt.Errorf("Unhandled operation type: %s", operation.GetType().String())
-		}
-
-		// verify hash
-		hash := hex.EncodeToString(bufSha.Sum(nil))
-		expectedHash := hex.EncodeToString(operation.GetDataSha256Hash())
-		if expectedHash != "" && hash != expectedHash {
-			return fmt.Errorf("Verify failed (Checksum mismatch): %s (%s != %s)", name, hash, expectedHash)
-		}
+func (p *Payload) Repack(partition *chromeos_update_engine.PartitionUpdate, out *os.File) error {
+	// Write data blob
+	buf, err := p.readDataBlob(*partition.DataOffset, *partition.DataLength)
+	if err != nil {
+		return err
+	}
+	if _, err := out.Write(buf); err != nil {
+		return err
 	}
 
 	return nil
-}
-
-func (p *Payload) worker() {
-	for req := range p.requests {
-		partition := req.partition
-		targetDirectory := req.targetDirectory
-
-		name := fmt.Sprintf("%s.img", partition.GetPartitionName())
-		filepath := fmt.Sprintf("%s/%s", targetDirectory, name)
-		file, err := os.OpenFile(filepath, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0755)
-		if err != nil {
-		}
-		if err := p.Extract(partition, file); err != nil {
-			fmt.Println(err.Error())
-		}
-
-		p.workerWG.Done()
-	}
 }
 
 func (p *Payload) spawnExtractWorkers(n int) {
