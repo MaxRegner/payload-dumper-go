@@ -134,5 +134,23 @@ func main() {
 			log.Fatalf("Partition %s not found in payload.bin\n", partitionName)
 		}
 	}
+	}
+		}
 
+		p.workerWG.Add(1)
+		p.requests <- &request{
+			partition:       partition,
+			targetDirectory: targetDirectory,
+		}
+	}
+
+	p.workerWG.Wait()
+	close(p.requests)
+
+	return nil
+}
+
+func (p *Payload) ExtractAll(targetDirectory string) error {
+	return p.ExtractSelected(targetDirectory, nil)
+}
 	
